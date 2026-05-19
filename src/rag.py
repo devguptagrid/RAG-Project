@@ -10,7 +10,9 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
 from qdrant_client.models import PointStruct
 import numpy as np
+from sentence_transformers import CrossEncoder
 
+cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 vertexai.init(project="gd-gcp-gridu-genai", location="us-central1")
 
 
@@ -110,6 +112,19 @@ def rerank(query, retrieved_chunks, model, chunk_embeddings, all_chunks):
     scored.sort(reverse=True, key=lambda x: x[0])
     
     return [chunk for _, chunk in scored]
+
+def cross_rerank(query, retrieved_chunks, k=3):
+    
+    pairs = [(query, chunk) for chunk in retrieved_chunks]
+    
+    scores = cross_encoder.predict(pairs)
+    
+    scored = list(zip(scores, retrieved_chunks))
+    
+    scored.sort(reverse=True, key=lambda x: x[0])
+    
+    return [chunk for _, chunk in scored[:k]]
+
 
 def generate_answer(query, context_chunks):
     model = GenerativeModel("gemini-2.0-flash")

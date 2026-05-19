@@ -31,13 +31,12 @@ for i, row in df.iterrows():
     
     # 🔹 Step 1: Retrieve
     retrieved = search(question, model, index, chunks, k=3)
-    reranked = rerank(
+    reranked = cross_rerank(
         question,
         retrieved,
-        model,
-        embeddings,
-        chunks
-    )[:3]   # keep top 5
+        k=5
+    )
+       # keep top 5
     
     # 🔹 Step 2: Generate answer
     answer = generate_answer(question, reranked)

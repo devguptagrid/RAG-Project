@@ -22,8 +22,8 @@ if __name__ == "__main__":
     
     retrieved = search(query, model, index, chunks, k=10)
 
-    results = rerank(query, retrieved)
-    
+    #results = rerank(query, retrieved)
+    results = cross_rerank(query, retrieved,k=5)
 
     answer = generate_answer(query, results)
 
@@ -43,7 +43,7 @@ if __name__ == "__main__":
     query = "What is the mission of IFC?"
 
     retrieved = search_qdrant(client, collection_name, query, model, k=10)
-    results = rerank(query, retrieved)
+    results = cross_rerank(query, retrieved,k=5)
     print("\nQdrant Results:\n")
 
     for i, res in enumerate(results):

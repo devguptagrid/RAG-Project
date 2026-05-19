@@ -33,7 +33,7 @@ model, index, chunks = load_pipeline()
 def run_rag_pipeline(query):
     
     retrieved = search(query, model, index, chunks, k=10)
-    results = rerank(query, retrieved)
+    results = cross_rerank(query, retrieved, k=5)
     
     answer = generate_answer(query, results)
     
