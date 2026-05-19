@@ -1,3 +1,5 @@
+from pyexpat import model
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import fitz
 import re
@@ -86,36 +88,21 @@ def create_faiss_index(embeddings):
     
     return index
 
-def search(query,model, index, chunks, k=3):
-    
-    query_embedding = model.encode([query],normalize_embeddings=True)
-    
+def search_text(query, model, index, chunks, k=10):
+    query_embedding = model.encode([query], normalize_embeddings=True)
     distances, indices = index.search(query_embedding, k)
     
-    results = [chunks[i] for i in indices[0]]
-    
-    return results
+    return [chunks[i] for i in indices[0]]   # ✅ returns text
 
-
-def rerank(query, retrieved_chunks, model, chunk_embeddings, all_chunks):
-    query_embedding = model.encode([query], normalize_embeddings=True)[0]
+def search_indices(query, model, index, chunks, k=10):
+    query_embedding = model.encode([query], normalize_embeddings=True)
+    distances, indices = index.search(query_embedding, k)
     
-    scored = []
-    
-    for chunk in retrieved_chunks:
-        idx = all_chunks.index(chunk)
-        chunk_embedding = chunk_embeddings[idx]
-        
-        score = np.dot(query_embedding, chunk_embedding)
-        scored.append((score, chunk))
-    
-    scored.sort(reverse=True, key=lambda x: x[0])
-    
-    return [chunk for _, chunk in scored]
+    return indices[0]   # ✅ returns indices
 
 def cross_rerank(query, retrieved_chunks, k=3):
     
-    pairs = [(query, chunk) for chunk in retrieved_chunks]
+    pairs = [(query, chunk["text"]) for chunk in retrieved_chunks]
     
     scores = cross_encoder.predict(pairs)
     
@@ -188,3 +175,67 @@ def search_qdrant(client, collection_name, query, model, k=3):
     )
     
     return [res.payload["text"] for res in results.points]
+
+
+def chunk_text_with_metadata(pdf_path):
+    doc = fitz.open(pdf_path)
+    
+    chunks = []
+    
+    for page_num, page in enumerate(doc):
+        page_text = page.get_text()
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=300,       # slightly bigger for better context
+            chunk_overlap=50,
+            separators=["\n\n", "\n", ".", " ", ""]
+        )
+        split_chunks = splitter.split_text(page_text)
+        
+        for chunk in split_chunks:
+            chunks.append({
+                "text": chunk,
+                "page": page_num + 1
+            })
+    
+    return chunks
+
+def filter_by_page(chunks, start, end):
+    return [c for c in chunks if start <= c["page"] <= end]
+
+
+def run_phase3_pipeline(query, model, index, metadata_chunks, start_page=None, end_page=None):
+
+    print("USING NEW PIPELINE")
+
+    # 🔹 Step 1: Prepare text list (same used for embeddings)
+    texts = [c["text"] for c in metadata_chunks]
+
+    # 🔹 Step 2: Retrieve indices (NOT text)
+    indices = search_indices(query, model, index, texts, k=15)
+
+    # 🔹 Step 3: Map indices → metadata chunks (direct, no matching)
+    retrieved_chunks = [metadata_chunks[i] for i in indices]
+
+    # 🔹 Step 4: Apply metadata filtering (optional)
+    if start_page is not None and end_page is not None:
+        retrieved_chunks = filter_by_page(retrieved_chunks, start_page, end_page)
+
+    # 🔹 Step 5: Cross-encoder reranking
+    reranked_chunks = cross_rerank(query, retrieved_chunks, k=7)
+
+    # 🔹 Step 6: Extract final context
+    final_contexts = [c["text"] for c in reranked_chunks]
+
+    # 🔹 Debug (optional but useful)
+    print("\nFINAL CONTEXT:\n")
+    for c in final_contexts:
+        print(c[:200])
+        print("------")
+
+    # 🔹 Step 7: Generate answer
+    answer = generate_answer(query, final_contexts)
+
+    return {
+        "answer": answer,
+        "retrieved_chunks": reranked_chunks
+    }

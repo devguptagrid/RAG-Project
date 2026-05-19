@@ -22,8 +22,9 @@ embedding_model = HuggingFaceEmbeddings(
 ragas_embeddings = LangchainEmbeddingsWrapper(embedding_model)
 
 
+
 # 🔹 Load results
-df = pd.read_csv("results.csv")
+df = pd.read_csv("results_qdrant.csv")
 
 
 ragas_llm = LangchainLLMWrapper(llm)
@@ -56,4 +57,4 @@ result = evaluate(
 )
 
 
-print(result)
+print("result_qdrant", result)

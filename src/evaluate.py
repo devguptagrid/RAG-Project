@@ -20,8 +20,15 @@ index = create_faiss_index(embeddings)
 
 
 # 🔹 Store results
-results_data = []
+results_data_faiss = []
+results_data_qdrant = []
 
+
+client = create_qdrant_client()
+collection_name = "ifc_collection"
+
+create_collection(client, collection_name, embeddings.shape[1])
+insert_into_qdrant(client, collection_name, chunks, embeddings)
 
 # 🔹 Loop through dataset
 for i, row in df.iterrows():
@@ -30,31 +37,39 @@ for i, row in df.iterrows():
     ground_truth = row["Ground_Truth_Answer"]
     
     # 🔹 Step 1: Retrieve
-    retrieved = search(question, model, index, chunks, k=3)
-    reranked = cross_rerank(
-        question,
-        retrieved,
-        k=5
-    )
-       # keep top 5
+    retrieved_faiss = search_text(question, model, index, chunks, k=10)
     
+    retrieved_qdrant = search_qdrant(client, collection_name, question, model, k=10)
+    
+
     # 🔹 Step 2: Generate answer
-    answer = generate_answer(question, reranked)
+    answer_faiss = generate_answer(question, retrieved_faiss)
+    answer_qdrant = generate_answer(question, retrieved_qdrant)
+    
+
     
     # 🔹 Save result
-    results_data.append({
+    results_data_faiss.append({
         "question": question,
         "ground_truth": ground_truth,
-        "answer": answer,
-        "contexts": reranked
+        "answer": answer_faiss,
+        "contexts": retrieved_faiss
+    })
+    results_data_qdrant.append({
+        "question": question,
+        "ground_truth": ground_truth,
+        "answer": answer_qdrant,
+        "contexts": retrieved_qdrant
     })
 
 
 # 🔹 Convert to DataFrame
-results_df = pd.DataFrame(results_data)
+results_df_faiss = pd.DataFrame(results_data_faiss)
+results_df_qdrant = pd.DataFrame(results_data_qdrant)
 
 
 # 🔹 Save results
-results_df.to_csv("results.csv", index=False)
+results_df_faiss.to_csv("results_faiss.csv", index=False)
+results_df_qdrant.to_csv("results_qdrant.csv", index=False)
 
-print("Evaluation data generated and saved to results.csv")
+print("Evaluation data generated and saved to results_faiss.csv and results_qdrant.csv")
