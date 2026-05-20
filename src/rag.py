@@ -1,5 +1,4 @@
 from pyexpat import model
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import fitz
 import re
@@ -13,6 +12,7 @@ from qdrant_client.models import PointStruct, VectorParams, Distance
 from qdrant_client.models import PointStruct
 import numpy as np
 from sentence_transformers import CrossEncoder
+import pdfplumber
 
 cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 vertexai.init(project="gd-gcp-gridu-genai", location="us-central1")
@@ -119,7 +119,14 @@ def generate_answer(query, context_chunks):
     context = "\n\n".join(context_chunks)
     
     prompt = f"""
-    Answer the question based ONLY on the context below.
+    You are given context which may include both text and tables.
+
+    Instructions:
+    - If the context contains tables, carefully read them.
+    - Extract exact values from tables when needed.
+    - Use table data for numerical questions.
+    - If multiple years are present, compare them correctly.
+    - Do NOT ignore tables.
 
     Context:
     {context}
@@ -127,7 +134,7 @@ def generate_answer(query, context_chunks):
     Question:
     {query}
 
-    If the answer is not present, say "Not found in document".
+    Answer clearly and accurately.
     """
     
     response = model.generate_content(prompt)
@@ -194,7 +201,8 @@ def chunk_text_with_metadata(pdf_path):
         for chunk in split_chunks:
             chunks.append({
                 "text": chunk,
-                "page": page_num + 1
+                "page": page_num + 1,
+                "type": "text"
             })
     
     return chunks
@@ -239,3 +247,80 @@ def run_phase3_pipeline(query, model, index, metadata_chunks, start_page=None, e
         "answer": answer,
         "retrieved_chunks": reranked_chunks
     }
+
+
+
+
+
+def extract_tables(pdf_path):
+    tables = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            extracted_tables = page.extract_tables()
+
+            if extracted_tables:
+                for table in extracted_tables:
+                    tables.append({
+                        "table": table,
+                        "page": page_num + 1
+                    })
+
+    return tables
+
+def table_to_text(table):
+    rows = []
+    
+    for row in table:
+        # remove empty cells
+        cleaned_row = [cell.strip() for cell in row if cell and cell.strip() != ""]
+        
+        if cleaned_row:
+            rows.append(" | ".join(cleaned_row))
+    
+    return "\n".join(rows)
+
+def create_table_chunks(tables):
+    table_chunks = []
+
+    for t in tables:
+        table_text = table_to_text(t["table"])
+
+        if len(table_text.strip()) == 0:
+            continue
+
+        table_chunks.append({
+            "text": table_text,
+            "type": "table",
+            "page": t["page"]
+        })
+
+    return table_chunks
+
+def score_table(chunk, query):
+    text = chunk["text"].lower()
+    query_words = query.lower().split()
+
+    score = 0
+
+    # 1. keyword overlap (general)
+    for word in query_words:
+        if word in text:
+            score += 3
+
+    # 2. boost for multi-word matches
+    query_phrase = " ".join(query_words)
+    if query_phrase in text:
+        score += 10
+
+    # 3. numeric relevance (important for tables)
+    import re
+    numbers = re.findall(r"\d+", text)
+    if len(numbers) >= 3:
+        score += 5
+
+    # 4. currency / financial signals
+    if "$" in text:
+        score += 3
+
+    return score
