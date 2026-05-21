@@ -288,7 +288,7 @@ elif phase == "Phase 4: Multimodel RAG":
         # 🔹 Show retrieved context
         with st.expander("🔍 Retrieved Context"):
             for i, c in enumerate(retrieved):
-                st.markdown(f"**Chunk {i+1} | Page {c['page']} | Type: {c['type']}**")
+                st.markdown(f"**Chunk {i+1} | Page {c['page']}**")
                 st.write(c["text"][:500])
                 st.markdown("---")
 
