@@ -13,6 +13,8 @@ from qdrant_client.models import PointStruct
 import numpy as np
 from sentence_transformers import CrossEncoder
 import pdfplumber
+from vertexai.generative_models import GenerativeModel, Part
+from PIL import Image
 
 cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 vertexai.init(project="gd-gcp-gridu-genai", location="us-central1")
@@ -119,14 +121,14 @@ def generate_answer(query, context_chunks):
     context = "\n\n".join(context_chunks)
     
     prompt = f"""
-    You are given context which may include both text and tables.
+    You are given context from a financial report.
 
-    Instructions:
-    - If the context contains tables, carefully read them.
-    - Extract exact values from tables when needed.
-    - Use table data for numerical questions.
-    - If multiple years are present, compare them correctly.
-    - Do NOT ignore tables.
+    IMPORTANT INSTRUCTIONS:
+    - Data may come from tables converted to text.
+    - Carefully align values with their correct labels (years, categories).
+    - Do NOT guess.
+    - If multiple percentages are present, match the correct year explicitly.
+    - Prefer explicitly labeled values over ambiguous ones.
 
     Context:
     {context}
@@ -134,7 +136,7 @@ def generate_answer(query, context_chunks):
     Question:
     {query}
 
-    Answer clearly and accurately.
+    Answer clearly and correctly.
     """
     
     response = model.generate_content(prompt)
@@ -269,58 +271,159 @@ def extract_tables(pdf_path):
     return tables
 
 def table_to_text(table):
-    rows = []
-    
-    for row in table:
-        # remove empty cells
-        cleaned_row = [cell.strip() for cell in row if cell and cell.strip() != ""]
-        
-        if cleaned_row:
-            rows.append(" | ".join(cleaned_row))
-    
-    return "\n".join(rows)
+    if not table or len(table) < 2:
+        return ""
+
+    headers = table[0]  # first row
+
+    lines = []
+
+    for row in table[1:]:
+        row_text = []
+
+        for i in range(len(row)):
+            if row[i] and headers[i]:
+                row_text.append(f"{headers[i]}: {row[i]}")
+
+        if row_text:
+            lines.append(" | ".join(row_text))
+
+    return "\n".join(lines)
 
 def create_table_chunks(tables):
-    table_chunks = []
+    chunks = []
 
     for t in tables:
-        table_text = table_to_text(t["table"])
+        table = t["table"]
+        page = t["page"]
 
-        if len(table_text.strip()) == 0:
-            continue
+        text = table_to_text(table)
 
-        table_chunks.append({
-            "text": table_text,
+        # 🔥 KEEP WHOLE TABLE AS ONE CHUNK
+        chunks.append({
+            "text": text,
             "type": "table",
-            "page": t["page"]
+            "page": page
         })
 
-    return table_chunks
+    return chunks
 
 def score_table(chunk, query):
     text = chunk["text"].lower()
-    query_words = query.lower().split()
+    query = query.lower()
 
     score = 0
 
-    # 1. keyword overlap (general)
-    for word in query_words:
-        if word in text:
-            score += 3
+    # 🔥 strong keyword matching
+    keywords = [
+        "equity", "investment", "portfolio",
+        "percentage", "%", "share", "accounted"
+    ]
 
-    # 2. boost for multi-word matches
-    query_phrase = " ".join(query_words)
-    if query_phrase in text:
-        score += 10
+    for k in keywords:
+        if k in text and k in query:
+            score += 5
 
-    # 3. numeric relevance (important for tables)
-    import re
-    numbers = re.findall(r"\d+", text)
-    if len(numbers) >= 3:
+    # 🔥 year alignment
+    if "2023" in text and "2023" in query:
         score += 5
 
-    # 4. currency / financial signals
-    if "$" in text:
+    if "2024" in text and "2024" in query:
         score += 3
 
+    # 🔥 percentage presence
+    if "%" in text:
+        score += 3
+
+    # 🔥 table title relevance
+    if "portfolio" in text:
+        score += 4
+
     return score
+
+import fitz  # PyMuPDF
+import os
+
+def extract_images(pdf_path, output_dir="images"):
+    os.makedirs(output_dir, exist_ok=True)
+
+    doc = fitz.open(pdf_path)
+    image_paths = []
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        images = page.get_images(full=True)
+
+        for img_index, img in enumerate(images):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+
+            image_bytes = base_image["image"]
+            image_ext = base_image["ext"]
+
+            image_name = f"page{page_num+1}_img{img_index}.{image_ext}"
+            image_path = os.path.join(output_dir, image_name)
+
+            with open(image_path, "wb") as f:
+                f.write(image_bytes)
+
+            image_paths.append({
+                "path": image_path,
+                "page": page_num + 1
+            })
+
+    return image_paths
+
+def is_useful_image(description):
+    keywords = ["chart", "graph", "bar", "trend", "figure", "values"]
+    return any(k in description.lower() for k in keywords)
+
+
+
+def describe_image(image_path):
+    model = GenerativeModel("gemini-2.0-flash")
+
+    # read image as bytes
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
+
+    image_part = Part.from_data(
+        data=image_bytes,
+        mime_type="image/png"   # change if jpg
+    )
+
+    prompt = """
+    You are analyzing a chart or graph from a financial report.
+
+    Your task:
+    - Identify what the image represents
+    - Extract important values (numbers, years, categories)
+    - Describe trends or comparisons
+    - Be precise and structured
+
+    Ignore decorative or irrelevant details.
+    """
+
+    response = model.generate_content([prompt, image_part])
+
+    return response.text
+
+def is_useful_image(desc):
+    keywords = ["chart", "graph", "figure", "trend", "increase", "decrease", "values"]
+    return any(k in desc.lower() for k in keywords)
+
+def detect_figure_chunks(chunks):
+    figure_chunks = []
+
+    for c in chunks:
+        text = c.lower()
+
+        if "figure" in text or "chart" in text:
+            figure_chunks.append({
+                "text": c,
+                "type": "image",   # treat as image
+                "page": None
+            })
+
+    return figure_chunks
+

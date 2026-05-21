@@ -73,94 +73,133 @@ if __name__ == "__main__":
 
     # print("\n🔹 Phase 3 Answer:\n", result["answer"])
 
-    tables = extract_tables("data/ifc_report.pdf")
 
-    print("Total tables found:", len(tables))
+    # =========================================================
+    # 🔥 STEP 1: TEXT CHUNKS
+    # =========================================================
+    text_chunks = chunk_text_with_metadata(pdf_path)
 
-    # print first table
-    # if tables:
-        # print("\nSample table:\n")
-        # for row in tables[0]["table"]:
-        #     print(row)
-
-    if tables:
-        sample = tables[0]["table"]
-        
-        text_table = table_to_text(sample)
-        
-        # print("\nConverted Table:\n")
-        # print(text_table)
-
-    table_chunks = create_table_chunks(tables)
-
-    # print("Total table chunks:", len(table_chunks))
-
-    # print("\nSample table chunk:\n")
-    # print(table_chunks[0]["text"])
-    # print("\nPage:", table_chunks[0]["page"])
-    # print("Type:", table_chunks[0]["type"])
-
-    # 🔹 Step 1: text chunks (with metadata)
-    text_metadata_chunks = chunk_text_with_metadata(pdf_path)
-
-    # 🔹 Step 2: tables
+    # =========================================================
+    # 🔥 STEP 2: TABLE CHUNKS
+    # =========================================================
     tables = extract_tables(pdf_path)
     table_chunks = create_table_chunks(tables)
 
-    # 🔹 Step 3: merge
-    all_chunks = text_metadata_chunks + table_chunks
+    # =========================================================
+    # 🔥 STEP 3: IMAGE CHUNKS (FIXED POSITION)
+    # =========================================================
+    images = extract_images(pdf_path)
 
-    # print("Text chunks:", len(text_metadata_chunks))
-    # print("Table chunks:", len(table_chunks))
-    # print("Total chunks:", len(all_chunks))
-    # print(all_chunks[0])
-    # print(all_chunks[-1])   
-    
+    image_chunks = []
+
+    for img in images:
+
+        if img["path"].endswith(".jpx"):
+            continue
+
+        try:
+            desc = describe_image(img["path"])
+
+            if is_useful_image(desc):
+                image_chunks.append({
+                    "text": desc,
+                    "type": "image",
+                    "page": img["page"]
+                })
+
+        except Exception as e:
+            print(f"Skipping {img['path']} → {e}")
+
+    print("Total images:", len(images))
+    print("Useful images:", len(image_chunks))
+
+    # =========================================================
+    # 🔥 STEP 4: FIGURE CHUNKS (IMPORTANT ADDITION)
+    # =========================================================
+    figure_chunks = []
+
+    for c in text_chunks:
+        text = c["text"].lower()
+
+        if "figure" in text or "chart" in text:
+            figure_chunks.append({
+                "text": c["text"],
+                "type": "image",
+                "page": c["page"]
+            })
+
+    # =========================================================
+    # 🔥 STEP 5: MERGE EVERYTHING
+    # =========================================================
+    all_chunks = text_chunks + table_chunks + image_chunks + figure_chunks
+
+    print("Total chunks:", len(all_chunks))
+
+    # =========================================================
+    # 🔥 STEP 6: EMBEDDINGS + INDEX
+    # =========================================================
     texts = [c["text"] for c in all_chunks]
 
     embeddings = create_embeddings(model, texts)
     index = create_faiss_index(embeddings)
 
-    query = "What was the variance in value for 'Equity investments' under Long-Term Finance Own Account Commitments between the fiscal years 2023 and 2024?"
+    # =========================================================
+    # 🔥 STEP 7: QUERY
+    # =========================================================
+    query = "What was the total value of IFC's assets as of June 30, 2023?"
 
     indices = search_indices(query, model, index, texts, k=5)
 
     retrieved = [all_chunks[i] for i in indices]
 
+    # =========================================================
+    # 🔥 STEP 8: TABLE BOOSTING (FINAL CORRECT VERSION)
+    # =========================================================
 
-    # 🔥 Detect table-type query
-    if any(word in query.lower() for word in ["table", "values", "data", "numbers", "fy", "year", "income"]):
+    if any(word in query.lower() for word in ["table", "values", "data", "numbers", "fy", "year", "income", "variance", "percentage", "%", "share", "accounted"]):
 
-        # 🔥 IMPORTANT: use ALL tables, not retrieved ones
-        all_table_chunks = [c for c in all_chunks if c["type"] == "table"]
+        # 🔹 split FAISS results
+        retrieved_tables = [c for c in retrieved if c["type"] == "table"]
+        retrieved_texts = [c for c in retrieved if c["type"] == "text"]
 
-        # score all tables
+        # 🔥 If FAISS didn't return tables → fallback
+        if len(retrieved_tables) == 0:
+
+            # take nearby chunks (same pages as retrieved text)
+            pages = set([c["page"] for c in retrieved_texts])
+
+            fallback_tables = [
+                c for c in table_chunks
+                if c["page"] in pages
+            ]
+
+            retrieved_tables = fallback_tables
+
+        # 🔹 score only relevant tables
         sorted_tables = sorted(
-            all_table_chunks,
+            retrieved_tables,
             key=lambda x: score_table(x, query),
             reverse=True
         )
 
-        # split FAISS results
-        text_chunks = [c for c in retrieved if c["type"] == "text"]
-
-        # 🔥 FINAL ORDER (THIS IS KEY)
-        final_chunks = sorted_tables[:3] + text_chunks[:5]
+        # 🔥 FINAL COMBINATION (THIS IS KEY)
+        final_chunks = sorted_tables[:3] + retrieved_texts[:5]
 
     else:
         final_chunks = retrieved
 
-
-    # 🔥 Build context
+    # =========================================================
+    # 🔥 STEP 9: GENERATE ANSWER
+    # =========================================================
     context_chunks = [c["text"] for c in final_chunks]
 
-    # 🔥 Generate answer
     answer = generate_answer(query, context_chunks)
 
     print("\nFinal Answer:\n", answer)
 
-
-    # 🔍 Debug print
+    # =========================================================
+    # 🔍 DEBUG OUTPUT
+    # =========================================================
     print("\nRetrieved Context:\n")
 
     for r in final_chunks:
@@ -168,3 +207,4 @@ if __name__ == "__main__":
         print("PAGE:", r["page"])
         print(r["text"][:200])
         print("------")
+    

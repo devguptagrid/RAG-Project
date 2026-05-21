@@ -219,7 +219,78 @@ elif phase == "Phase 3: Hybrid Search+Metadata":
                     st.markdown("---")
 
 elif phase == "Phase 4: Multimodel RAG":
-    st.info("Coming soon")
+
+    st.header("🧠 Phase 4: Multimodal Retrieval (Text + Images)")
+
+    # 🔹 Load data
+    @st.cache_resource
+    def load_phase4_pipeline():
+        pdf_path = "data/ifc_report.pdf"
+
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+
+        # TEXT
+        text_chunks = chunk_text_with_metadata(pdf_path)
+
+        # IMAGES
+        images = extract_images(pdf_path)
+        image_chunks = []
+
+        for img in images:
+            if img["path"].endswith(".jpx"):
+                continue
+
+            try:
+                desc = describe_image(img["path"])
+
+                if is_useful_image(desc):
+                    image_chunks.append({
+                        "text": desc,
+                        "type": "image",
+                        "page": img["page"]
+                    })
+
+            except:
+                pass
+
+        # 🔥 MERGE TEXT + IMAGES
+        all_chunks = text_chunks + image_chunks
+
+        texts = [c["text"] for c in all_chunks]
+
+        embeddings = create_embeddings(model, texts)
+        index = create_faiss_index(embeddings)
+
+        return model, index, all_chunks
+
+    model4, index4, all_chunks4 = load_phase4_pipeline()
+
+    # 🔹 Query
+    query = st.text_input("Ask a multimodal question (text + charts):")
+
+    if query:
+        with st.spinner("Thinking across text and visuals..."):
+
+            texts = [c["text"] for c in all_chunks4]
+
+            indices = search_indices(query, model4, index4, texts, k=10)
+            retrieved = [all_chunks4[i] for i in indices]
+
+            # 🔥 Simple multimodal reasoning
+            context_chunks = [c["text"] for c in retrieved]
+
+            answer = generate_answer(query, context_chunks)
+
+        # 🔹 Output
+        st.subheader("📌 Answer")
+        st.success(answer)
+
+        # 🔹 Show retrieved context
+        with st.expander("🔍 Retrieved Context"):
+            for i, c in enumerate(retrieved):
+                st.markdown(f"**Chunk {i+1} | Page {c['page']} | Type: {c['type']}**")
+                st.write(c["text"][:500])
+                st.markdown("---")
 
 elif phase == "Phase 5: Multimodel RAG with Colpali-like approach":
     st.info("Coming soon")
