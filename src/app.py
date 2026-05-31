@@ -293,7 +293,214 @@ elif phase == "Phase 4: Multimodel RAG":
                 st.markdown("---")
 
 elif phase == "Phase 5: Multimodel RAG with Colpali-like approach":
-    st.info("Coming soon")
 
+    st.header("🧠 Phase 5: Multimodal RAG with ColPali-like Approach")
+    st.markdown("""
+    **End-to-end multimodal RAG pipeline** using:
+    - **PaliGemma 3B** for visual patch embeddings (ColPali-style)
+    - **MaxSim / Late Interaction** retrieval
+    - **Gemini 2.5 Pro** for multimodal answer generation
+    - **Enhanced source attribution** with color-coded bounding boxes
+    """)
 
+    # ── CACHED HELPERS FOR STREAMLIT SPEED ──
+    @st.cache_resource
+    def get_cached_pali_model():
+        return load_colpali_model()
 
+    @st.cache_resource
+    def get_cached_text_model():
+        return SentenceTransformer("all-MiniLM-L6-v2")
+
+    @st.cache_data
+    def get_cached_text_chunks(pdf_path):
+        return chunk_text_with_metadata(pdf_path)
+
+    @st.cache_data
+    def get_cached_pdf_images(pdf_path):
+        return pdf_to_images_phase6(pdf_path)
+
+    # 🔹 Query input
+    query = st.text_input("Ask a question about the IFC report:", key="phase5_query")
+
+    # 🔹 Advanced settings
+    with st.expander("⚙️ Advanced Settings"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            top_k_pages = st.slider("Top-K Pages", min_value=1, max_value=5, value=3)
+        with col2:
+            max_patches = st.slider("Max Patches", min_value=100, max_value=800, value=400, step=50)
+        with col3:
+            patch_size = st.selectbox("Patch Size", [256, 384, 512], index=1)
+
+    if query:
+        pdf_path = "data/ifc_report.pdf"
+
+        # Progress tracking
+        progress_bar = st.progress(0, text="Initializing pipeline...")
+
+        try:
+            # ── STEP 1: Coarse text retrieval ──
+            progress_bar.progress(5, text="Step 1/6: Running coarse text retrieval...")
+
+            text_chunks = get_cached_text_chunks(pdf_path)
+            texts = [c["text"] for c in text_chunks]
+
+            text_model_st = get_cached_text_model()
+            text_embeddings = create_embeddings(text_model_st, texts)
+            faiss_index = create_faiss_index(text_embeddings)
+
+            coarse_pages = get_top_pages_hybrid(query, text_chunks, text_model_st, faiss_index, texts, k=20)
+
+            progress_bar.progress(15, text="Step 2/6: Converting pages to visual patches...")
+
+            # ── STEP 2: Visual ingestion ──
+            images = get_cached_pdf_images(pdf_path)
+            filtered_images = [img for img in images if img["page"] in coarse_pages]
+
+            patches_by_page = {}
+            for img in filtered_images:
+                page_patches = create_smart_patches_phase6(img["path"], img["page"], patch_size=patch_size, stride=patch_size // 2)
+                patches_by_page[img["page"]] = page_patches
+
+            total_patches = sum(len(p) for p in patches_by_page.values())
+
+            # Distribute patch budget evenly across pages
+            if total_patches > max_patches and len(patches_by_page) > 0:
+                per_page_budget = max(max_patches // len(patches_by_page), 4)
+                patches = []
+                for page in sorted(patches_by_page.keys()):
+                    page_p = patches_by_page[page]
+                    if len(page_p) > per_page_budget:
+                        step = len(page_p) / per_page_budget
+                        page_p = [page_p[int(i * step)] for i in range(per_page_budget)]
+                    patches.extend(page_p)
+                patches = patches[:max_patches]
+            else:
+                patches = []
+                for page in sorted(patches_by_page.keys()):
+                    patches.extend(patches_by_page[page])
+
+            progress_bar.progress(25, text=f"Step 3/6: Generating PaliGemma embeddings for {len(patches)} patches...")
+
+            # ── STEP 3: PaliGemma embeddings ──
+            pali_model, pali_processor, device = get_cached_pali_model()
+
+            patch_token_embeddings = embed_patches_colpali(
+                pali_model, pali_processor, patches, device
+            )
+
+            query_tokens = embed_query_colpali(pali_model, pali_processor, query, device)
+
+            progress_bar.progress(70, text="Step 4/6: Running hybrid reranking...")
+
+            # ── STEP 4: Hybrid reranking ──
+            final_pages, retrieved_patches = hybrid_rerank_phase6(
+                query, text_chunks, text_model_st, faiss_index, texts,
+                query_tokens, patch_token_embeddings, patches,
+                k_text=20, k_patches=15, top_k_pages=top_k_pages
+            )
+
+            progress_bar.progress(80, text=f"Step 5/6: Generating answer from pages {final_pages}...")
+
+            # ── STEP 5: Multi-page generation ──
+            page_image_paths = [
+                img["path"] for img in filtered_images
+                if img["page"] in final_pages
+            ]
+
+            for page in final_pages:
+                matching = [img["path"] for img in images if img["page"] == page]
+                if matching and matching[0] not in page_image_paths:
+                    page_image_paths.append(matching[0])
+
+            text_context = "\n\n".join([
+                c["text"] for c in text_chunks
+                if c["page"] in final_pages
+            ])
+
+            answer = generate_answer_phase6(query, page_image_paths, text_context)
+
+            progress_bar.progress(90, text="Step 6/6: Generating source attribution...")
+
+            # ── STEP 6: Source attribution ──
+            attribution_paths = create_attribution_report(
+                query, answer, retrieved_patches, filtered_images
+            )
+
+            progress_bar.progress(100, text="✅ Complete!")
+
+            # =========================================================
+            # DISPLAY RESULTS
+            # =========================================================
+
+            # Answer
+            st.subheader("📌 Answer")
+            st.success(answer)
+
+            # Retrieved pages
+            st.subheader("📄 Retrieved Pages")
+            page_cols = st.columns(min(len(final_pages), 3))
+            for i, page in enumerate(final_pages):
+                with page_cols[i % 3]:
+                    st.metric(f"Page {page}", f"Rank #{i+1}")
+
+            # Source Attribution
+            st.subheader("🎯 Source Attribution")
+            if attribution_paths:
+                attr_cols = st.columns(min(len(attribution_paths), 2))
+                for i, attr in enumerate(attribution_paths):
+                    with attr_cols[i % 2]:
+                        st.markdown(f"**Page {attr['page']}** ({attr['num_patches']} relevant patches)")
+                        st.image(attr["path"], caption=f"Attribution — Page {attr['page']}")
+
+            # Retrieved Patches Detail
+            with st.expander("🔍 Retrieved Patches (Top 10)"):
+                for i, p in enumerate(retrieved_patches[:10]):
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        st.image(p["image"], caption=f"Patch {i+1}", width=150)
+                    with col2:
+                        st.markdown(f"""
+                        **Rank:** #{i+1}  
+                        **Page:** {p['page']}  
+                        **Coords:** ({p['coords'][0]}, {p['coords'][1]})  
+                        **Region Type:** {p.get('region_type', 'N/A')}  
+                        **MaxSim Score:** {p.get('maxsim_score', 'N/A'):.4f}
+                        """)
+                    st.markdown("---")
+
+            # Text Context
+            with st.expander("📝 Supplementary Text Context"):
+                for page in final_pages:
+                    st.markdown(f"**Page {page}:**")
+                    page_text = "\n".join([c["text"] for c in text_chunks if c["page"] == page])
+                    st.text(page_text[:1000])
+                    st.markdown("---")
+
+            # Pipeline Stats
+            with st.expander("📊 Pipeline Statistics"):
+                stat_cols = st.columns(4)
+                with stat_cols[0]:
+                    st.metric("Candidate Pages", len(coarse_pages))
+                with stat_cols[1]:
+                    st.metric("Total Patches", len(patches))
+                with stat_cols[2]:
+                    st.metric("Final Pages", len(final_pages))
+                with stat_cols[3]:
+                    st.metric("Top Patches", len(retrieved_patches))
+
+                # Region type breakdown
+                region_counts = {}
+                for p in patches:
+                    rt = p.get("region_type", "unknown")
+                    region_counts[rt] = region_counts.get(rt, 0) + 1
+
+                st.markdown("**Patch Region Types:**")
+                for rt, count in sorted(region_counts.items(), key=lambda x: x[1], reverse=True):
+                    st.write(f"  • {rt}: {count}")
+
+        except Exception as e:
+            st.error(f"Pipeline error: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())

@@ -1,0 +1,9 @@
+{
+  "python.defaultInterpreterPath": "/Users/devgupta/Desktop/Internship/RAG/venv/bin/python",
+  "python.pythonPath": "/Users/devgupta/Desktop/Internship/RAG/venv/bin/python",
+  "python.analysis.extraPaths": [
+    "/Users/devgupta/Desktop/Internship/RAG/src",
+    "/Users/devgupta/Desktop/Internship/RAG/venv/lib/python3.11/site-packages"
+  ],
+  "python.analysis.autoSearchPaths": true
+}
